@@ -11,6 +11,7 @@
 #define FAISS_INDEX_IVF_H
 
 #include <stdint.h>
+#include <iostream>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -71,12 +72,14 @@ struct Level1Quantizer {
 struct SearchParametersIVF : SearchParameters {
     size_t nprobe = 1;    ///< number of probes at query time
     size_t max_codes = 0; ///< max nb of codes to visit to do a query
-    ///< indicate whether we should early teriminate before topk results full when search reaches max_codes
-    ///< to minimize code change, when users only use nprobe to search, this config does not take affect since we will first retrieve the nearest nprobe buckets
-    ///< it is a bit heavy to further retrieve more buckets
-    ///< therefore to make sure we get topk results, use nprobe=nlist and use max_codes to narrow down the search range
+    ///< indicate whether we should early teriminate before topk results full
+    ///< when search reaches max_codes to minimize code change, when users only
+    ///< use nprobe to search, this config does not take affect since we will
+    ///< first retrieve the nearest nprobe buckets it is a bit heavy to further
+    ///< retrieve more buckets therefore to make sure we get topk results, use
+    ///< nprobe=nlist and use max_codes to narrow down the search range
     bool ensure_topk_full = false;
-    
+
     SearchParameters* quantizer_params = nullptr;
 
     virtual ~SearchParametersIVF() {}
@@ -432,7 +435,9 @@ struct IndexIVF : Index, IndexIVFInterface {
      * @param new_maintain_direct_map    if true, create a direct map,
      *                                   else clear it
      */
-    void make_direct_map(bool new_maintain_direct_map = true, DirectMap::Type type = DirectMap::Type::Array);
+    void make_direct_map(
+            bool new_maintain_direct_map = true,
+            DirectMap::Type type = DirectMap::Type::Array);
 
     void set_direct_map_type(DirectMap::Type type);
 
@@ -502,6 +507,15 @@ struct InvertedListScanner {
             idx_t* labels,
             size_t k,
             size_t& scan_cnt) const;
+
+    virtual size_t scan_codes_and_push_back(
+            size_t list_size,
+            const uint8_t* codes,
+            const float* code_norms,
+            const idx_t* ids,
+            float* distances,
+            idx_t* labels,
+            size_t& counter_back) const;
 
     // same as scan_codes, using an iterator
     virtual size_t iterate_codes(

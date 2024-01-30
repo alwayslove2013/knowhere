@@ -11,6 +11,8 @@
 
 #include "knowhere/index.h"
 
+#include <iostream>
+
 #include "knowhere/comp/time_recorder.h"
 #include "knowhere/dataset.h"
 #include "knowhere/expected.h"
@@ -116,6 +118,8 @@ Index<T>::AnnIterator(const DataSet& dataset, const Json& json, const BitsetView
     }
     const auto bitset = BitsetView(bitset_.data(), bitset_.size(), bitset_.get_filtered_out_num_());
 
+    std::cout << "Index<T>::AnnIterator begin" << std::endl;
+
 #ifdef NOT_COMPILE_FOR_SWIG
     // note that this time includes only the initial search phase of iterator.
     TimeRecorder rc("AnnIterator");
@@ -126,6 +130,7 @@ Index<T>::AnnIterator(const DataSet& dataset, const Json& json, const BitsetView
 #else
     auto res = this->node->AnnIterator(dataset, *cfg, bitset);
 #endif
+    std::cout << "Index<T>::AnnIterator end" << std::endl;
     return res;
 }
 

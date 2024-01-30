@@ -8,6 +8,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
+#include <iostream>
 
 #include "common/metric.h"
 #include "common/range_util.h"
@@ -70,6 +71,8 @@ class IvfIndexNode : public IndexNode {
     Search(const DataSet& dataset, const Config& cfg, const BitsetView& bitset) const override;
     expected<DataSetPtr>
     RangeSearch(const DataSet& dataset, const Config& cfg, const BitsetView& bitset) const override;
+    expected<std::vector<std::shared_ptr<IndexNode::iterator>>>
+    AnnIterator(const DataSet& dataset, const Config& cfg, const BitsetView& bitset) const override;
     expected<DataSetPtr>
     GetVectorByIds(const DataSet& dataset) const override;
     bool
@@ -224,7 +227,51 @@ class IvfIndexNode : public IndexNode {
     Status
     SerializeImpl(BinarySet& binset, IVFFlatTag) const;
 
- private:
+    // only support IVFFlat and IVFFlatCC
+    class iterator : public IndexNode::iterator {
+     public:
+        iterator(const IndexType* index, const float* query_data, const faiss::IVFSearchParameters* ivfsearchParams)
+            : index_(index), workspace_(index_->getIteratorWorkspace(query_data, ivfsearchParams)) {
+            UpdateNext();
+            std::cout << "init iterator!" << std::endl;
+        }
+
+        std::pair<int64_t, float>
+        Next() override {
+            auto ret = std::make_pair(next_id_, next_dist_);
+            UpdateNext();
+            return ret;
+        }
+
+        [[nodiscard]] bool
+        HasNext() const override {
+            return has_next_;
+        }
+
+     private:
+        void
+        UpdateNext() {
+            auto next = index_->getIteratorNext(workspace_.get());
+            if (next.has_value()) {
+                auto [dist, id] = next.value();
+                std::cout << "[next] id: " << id << ", dist: " << dist << ", backup_count: " << workspace_->backup_count
+                          << std::endl;
+                next_dist_ = dist;
+                next_id_ = id;
+                has_next_ = true;
+            } else {
+                std::cout << "false" << std::endl;
+                has_next_ = false;
+            }
+        }
+
+        const IndexType* index_;
+        std::unique_ptr<faiss::IVFFlatIteratorWorkspace> workspace_;
+        bool has_next_;
+        float next_dist_;
+        int64_t next_id_;
+    };
+
     std::unique_ptr<IndexType> index_;
     std::shared_ptr<ThreadPool> search_pool_;
 };
@@ -361,6 +408,7 @@ IvfIndexNode<DataType, IndexType>::Train(const DataSet& dataset, const Config& c
             qzr.release();
             index->own_fields = true;
             // ivfflat_cc has no serialize stage, make map at build stage
+            // tm - direct_map
             index->make_direct_map(true, faiss::DirectMap::ConcurrentArray);
         }
         if constexpr (std::is_same<faiss::IndexIVFPQ, IndexType>::value) {
@@ -582,6 +630,7 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSet& dataset, const Config& 
 
                     index_->search(1, cur_query, k, distances + offset, ids + offset, &scann_search_params);
                 } else {
+                    // ivfflat?
                     auto cur_query = (const float*)data + index * dim;
                     if (is_cosine) {
                         copied_query = CopyAndNormalizeVecs(cur_query, 1, dim);
@@ -742,6 +791,77 @@ IvfIndexNode<DataType, IndexType>::RangeSearch(const DataSet& dataset, const Con
     }
 
     return GenResultDataSet(nq, ids, distances, lims);
+}
+
+template <typename DataType, typename IndexType>
+expected<std::vector<std::shared_ptr<IndexNode::iterator>>>
+IvfIndexNode<DataType, IndexType>::AnnIterator(const DataSet& dataset, const Config& cfg,
+                                               const BitsetView& bitset) const {
+    if (!index_) {
+        LOG_KNOWHERE_WARNING_ << "creating iterator on empty index";
+        // expected<DataSetPtr>::Err(Status::empty_index, "index not loaded");
+    }
+    if (!index_->is_trained) {
+        LOG_KNOWHERE_WARNING_ << "index not trained";
+        // expected<DataSetPtr>::Err(Status::index_not_trained, "index not trained");
+    }
+    // only support IVFFlat and IVFFlatCC;
+    if constexpr (!std::is_same_v<faiss::IndexIVFFlatCC, IndexType> &&
+                  !std::is_same_v<faiss::IndexIVFFlat, IndexType>) {
+        LOG_KNOWHERE_WARNING_ << "only ivfflat and ivfflatcc support iterator";
+        // expected<DataSetPtr>::Err(Status::not_implemented, "index not supported");
+    } else {
+        auto dim = dataset.GetDim();
+        auto rows = dataset.GetRows();
+        auto data = dataset.GetTensor();
+
+        auto vec = std::vector<std::shared_ptr<IndexNode::iterator>>(rows, nullptr);
+
+        const IvfConfig& ivf_cfg = static_cast<const IvfConfig&>(cfg);
+        bool is_cosine = IsMetricType(ivf_cfg.metric_type.value(), knowhere::metric::COSINE);
+
+        auto nprobe = ivf_cfg.nprobe.value();
+
+        try {
+            std::vector<folly::Future<folly::Unit>> futs;
+            futs.reserve(rows);
+            for (int i = 0; i < rows; ++i) {
+                futs.emplace_back(search_pool_->push([&, index = i] {
+                    std::unique_ptr<float[]> copied_query = nullptr;
+
+                    auto cur_query = (const float*)data + index * dim;
+                    if (is_cosine) {
+                        copied_query = CopyAndNormalizeVecs(cur_query, 1, dim);
+                        cur_query = copied_query.get();
+                    }
+
+                    BitsetViewIDSelector bw_idselector(bitset);
+                    faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
+
+                    faiss::IVFSearchParameters ivf_search_params;
+                    ivf_search_params.nprobe = nprobe;
+                    ivf_search_params.max_codes = 0;
+                    ivf_search_params.sel = id_selector;
+
+                    // todo tianmin default nq=1?
+                    vec[i].reset(new iterator(index_.get(), cur_query, &ivf_search_params));
+                    std::cout << "vec[i].reset finished!" << std::endl;
+                }));
+            }
+
+            // wait for the completion
+            for (auto& fut : futs) {
+                fut.wait();
+            }
+
+            std::cout << "fut.wait finish" << std::endl;
+
+        } catch (const std::exception& e) {
+            LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
+            // expected<DataSetPtr>::Err(Status::faiss_inner_error, e.what());
+        }
+        return vec;
+    }
 }
 
 template <typename DataType, typename IndexType>
