@@ -136,7 +136,46 @@ class DiskANNIndexNode : public IndexNode {
         return knowhere::IndexEnum::INDEX_DISKANN;
     }
 
+    expected<std::vector<std::shared_ptr<IndexNode::iterator>>>
+    AnnIterator(const DataSetPtr dataset, const Config& cfg, const BitsetView& bitset) const override;
+
  private:
+    class iterator : public IndexIterator {
+     public:
+        iterator(const bool transform, const DataType* query_data, const uint64_t lsearch, const uint64_t beam_width,
+                 const bool use_reorder_data, const float filter_ratio, const bool for_tuning,
+                 const knowhere::BitsetView& bitset, diskann::PQFlashIndex<DataType>* index)
+            : IndexIterator(transform),
+              index_(index),
+              transform_(transform),
+              workspace_(index_->getIteratorWorkspace(query_data, lsearch, beam_width, use_reorder_data, filter_ratio,
+                                                      for_tuning, bitset)) {
+        }
+
+     protected:
+        void
+        next_batch(std::function<void(const std::vector<DistId>&)> batch_handler) override {
+            index_->getIteratorNextBatch(workspace_.get());
+            if (transform_) {
+                for (auto& p : workspace_->backup_res) {
+                    p.val = -p.val;
+                }
+            }
+            batch_handler(workspace_->backup_res);
+            workspace_->backup_res.clear();
+        }
+
+        float
+        raw_distance(int64_t id) override {
+            return 1;
+        }
+
+     private:
+        diskann::PQFlashIndex<DataType>* index_;
+        const bool transform_;
+        std::unique_ptr<diskann::IteratorWorkspace<DataType>> workspace_;
+    };
+
     bool
     LoadFile(const std::string& filename) {
         if (!file_manager_->LoadFile(filename)) {
@@ -502,6 +541,55 @@ DiskANNIndexNode<DataType>::Deserialize(const BinarySet& binset, const Config& c
     is_prepared_.store(true);
     LOG_KNOWHERE_INFO_ << "End of diskann loading.";
     return Status::success;
+}
+
+template <typename DataType>
+expected<std::vector<std::shared_ptr<IndexNode::iterator>>>
+DiskANNIndexNode<DataType>::AnnIterator(const DataSetPtr dataset, const Config& cfg, const BitsetView& bitset) const {
+    if (!is_prepared_.load() || !pq_flash_index_) {
+        LOG_KNOWHERE_ERROR_ << "Failed to load diskann.";
+        return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::empty_index,
+                                                                                "DiskANN not loaded");
+    }
+
+    auto search_conf = static_cast<const DiskANNConfig&>(cfg);
+    if (!CheckMetric(search_conf.metric_type.value())) {
+        return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::invalid_metric_type,
+                                                                                "unsupported metric type");
+    }
+
+    constexpr uint64_t k_lsearch_iterator = 32;
+    auto lsearch = static_cast<uint64_t>(search_conf.search_list_size.value_or(k_lsearch_iterator));
+    auto beamwidth = static_cast<uint64_t>(search_conf.beamwidth.value());
+    auto filter_ratio = static_cast<float>(search_conf.filter_threshold.value());
+    auto for_tuning = static_cast<bool>(search_conf.for_tuning.value());
+
+    auto nq = dataset->GetRows();
+    auto dim = dataset->GetDim();
+    auto xq = dataset->GetTensor();
+
+    std::vector<folly::Future<folly::Unit>> futs;
+    futs.reserve(nq);
+    auto vec = std::vector<std::shared_ptr<IndexNode::iterator>>(nq, nullptr);
+    auto metric = search_conf.metric_type.value();
+    bool transform = metric != knowhere::metric::L2;
+
+    for (int i = 0; i < nq; i++) {
+        futs.emplace_back(search_pool_->push([&, id = i]() {
+            auto single_query = (DataType*)xq + id * dim;
+            auto it = std::make_shared<iterator>(transform, single_query, lsearch, beamwidth, false, filter_ratio,
+                                                 for_tuning, bitset, pq_flash_index_.get());
+            it->initialize();
+            vec[id] = it;
+        }));
+    }
+
+    if (TryDiskANNCall([&]() { WaitAllSuccess(futs); }) != Status::success) {
+        return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::diskann_inner_error,
+                                                                                "some ann-iterator failed");
+    }
+
+    return vec;
 }
 
 template <typename DataType>

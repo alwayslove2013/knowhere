@@ -77,6 +77,274 @@ namespace diskann {
     QueryScratch<T> scratch;
   };
 
+  // class SortedVector {
+  //  public:
+  //   explicit SortedVector(size_t max_size) : max_size(max_size) {
+  //     data.reserve(max_size * 2);
+  //   }
+
+  //   void push(const Neighbor &neighbor) {
+  //     // 使用二分查找找到插入位置
+  //     auto it = std::lower_bound(data.begin(), data.end(), neighbor);
+  //     data.insert(it, neighbor);
+  //     if (data.size() > max_size) {
+  //       data.pop_back();
+  //     }
+  //   }
+
+  //   Neighbor pop() {
+  //     if (data.empty()) {
+  //       throw std::out_of_range("Pop from empty vector");
+  //     }
+  //     Neighbor minElem = data.front();
+  //     data.erase(data.begin());
+  //     return minElem;
+  //   }
+
+  //   const Neighbor &front() const {
+  //     if (data.empty()) {
+  //       throw std::out_of_range("Accessing front of empty vector");
+  //     }
+  //     return data.front();
+  //   }
+
+  //   const Neighbor &back() const {
+  //     if (data.empty()) {
+  //       throw std::out_of_range("Accessing back of empty vector");
+  //     }
+  //     return data.back();
+  //   }
+
+  //   bool empty() const {
+  //     return data.empty();
+  //   }
+
+  //   size_t size() const {
+  //     return data.size();
+  //   }
+
+  //  private:
+  //   size_t                max_size;
+  //   std::vector<Neighbor> data;
+  // };
+
+  // struct config {
+  //   // 构造函数
+  //   config(void *query_data, const _u64 ef, const bool for_tun,
+  //          const knowhere::BitsetView &bt, const _u64 b_width,
+  //          const float filter_ratio_in, const bool use_reorder_data)
+  //       : query_data(query_data), l_search(ef), beam_width(b_width),
+  //         use_reorder_data(use_reorder_data),            // 使用传入的值
+  //         bitset(bt), filter_ratio_in(filter_ratio_in),  // 使用传入的值
+  //         for_tuning(for_tun) {
+  //   }
+
+  //   bool                 initial_search_done = false;
+  //   void                *query_data;
+  //   const _u64           l_search;  // ef
+  //   const _u64           beam_width;
+  //   const bool           use_reorder_data;  // 是否使用重排数据
+  //   knowhere::BitsetView bitset;
+  //   const float          filter_ratio_in;
+  //   const bool           for_tuning;
+  // };
+
+  // struct IteratorWorkspace {
+  //   IteratorWorkspace(void *query_data, const _u64 ef, const bool for_tun,
+  //                     const knowhere::BitsetView &bt, const _u64 b_width,
+  //                     float alpha, const float filter_ratio_in,
+  //                     const bool use_reorder_data)
+  //       : Config(query_data, ef, for_tun, bt, b_width, filter_ratio_in,
+  //                use_reorder_data),
+  //         accumulative_alpha(alpha), res(ef) {
+  //   }
+
+  //   float                accumulative_alpha;
+  //   config               Config;
+  //   SortedVector         res;
+  //   tsl::robin_set<_u64> visited;
+  //   std::priority_queue<diskann::Neighbor, std::vector<diskann::Neighbor>>
+  //                                 candidate;
+  //   std::vector<knowhere::DistId> dists;  // 统一接口
+
+  //   struct cmp {
+  //     bool operator()(const knowhere::DistId &d1, const knowhere::DistId &d2)
+  //     {
+  //       return d1.val > d2.val;
+  //     }
+  //   };
+  //   std::priority_queue<knowhere::DistId, std::vector<knowhere::DistId>, cmp>
+  //       refined_dists;  // refined dist
+  // };
+  template<typename T>
+  struct IteratorWorkspace {
+    IteratorWorkspace(const T *query_data, const diskann::Metric metric,
+                      const uint64_t aligned_dim, const uint64_t data_dim,
+                      const float alpha, const uint64_t lsearch,
+                      const uint64_t beam_width, const float filter_ratio,
+                      const bool for_tuning, const float max_base_norm,
+                      const knowhere::BitsetView &bitset)
+        : lsearch(lsearch), beam_width(beam_width), filter_ratio(filter_ratio),
+          metric(metric), alpha(alpha), for_tuning(for_tuning),
+          max_base_norm(max_base_norm), bitset(bitset) {
+      frontier.reserve(2 * beam_width);
+      frontier_nhoods.reserve(2 * beam_width);
+      frontier_read_reqs.reserve(2 * beam_width);
+      cached_nhoods.reserve(2 * beam_width);
+
+      /**
+       * own query and query_T
+       */
+      diskann::alloc_aligned((void **) &aligned_query_T,
+                             aligned_dim * sizeof(T), 8 * sizeof(T));
+      diskann::alloc_aligned((void **) &aligned_query_float,
+                             aligned_dim * sizeof(float), 8 * sizeof(float));
+      memset((void *) aligned_query_T, 0, aligned_dim * sizeof(T));
+      memset(aligned_query_float, 0, aligned_dim * sizeof(float));
+      q_dim = data_dim;
+      if (metric == diskann::Metric::INNER_PRODUCT) {
+        // query_dim need to be specially treated when using IP
+        q_dim--;
+      }
+      for (uint32_t i = 0; i < q_dim; i++) {
+        aligned_query_T[i] = query_data[i];
+        aligned_query_float[i] = (float) query_data[i];
+        query_norm += (float) query_data[i] * (float) query_data[i];
+      }
+
+      if (metric == diskann::Metric::INNER_PRODUCT ||
+          metric == diskann::Metric::COSINE) {
+        query_norm = std::sqrt(query_norm);
+        if (metric == diskann::Metric::INNER_PRODUCT) {
+          aligned_query_T[q_dim] = 0;
+          aligned_query_float[q_dim] = 0;
+        }
+        for (uint32_t i = 0; i < q_dim; i++) {
+          // a little bit weird
+          aligned_query_T[i] = (T) ((float) aligned_query_T[i] / query_norm);
+          aligned_query_float[i] /= query_norm;
+        }
+      }
+
+      visited = new tsl::robin_set<_u64>(4096);
+    }
+
+    ~IteratorWorkspace() {
+      diskann::aligned_free((void *) aligned_query_T);
+      diskann::aligned_free((void *) aligned_query_float);
+      delete visited;
+    }
+
+    bool is_good_pq_enough() {
+      return good_pq_res_count - next_count >= lsearch;
+    }
+
+    bool has_candidates() {
+      return !candidates.empty();
+    }
+
+    bool should_visit_next_candidate() {
+      if (candidates.empty()) {
+        return false;
+      }
+      if (retset.empty()) {
+        return true;
+      }
+      return candidates.top().distance <= retset.top().distance;
+    }
+
+    void insert_to_pq(unsigned id, float dist, bool valid) {
+      candidates.emplace(id, dist);
+      if (valid) {
+        retset.emplace(id, dist);
+      }
+    }
+
+    void insert_to_full(unsigned id, float dist) {
+      full_retset.emplace(id, dist);
+    }
+
+    void pop_pq_retset() {
+      while (!should_visit_next_candidate() && !retset.empty()) {
+        retset.pop();
+        good_pq_res_count++;
+      }
+    }
+
+    void move_full_retset_to_backup() {
+      if (is_good_pq_enough() && !full_retset.empty()) {
+        auto &nbr = full_retset.top();
+        auto  dist = nbr.distance;
+        if (metric == diskann::Metric::INNER_PRODUCT) {
+          dist = dist / 2.0f - 1.0f;
+          if (max_base_norm != 0) {
+            dist *= (max_base_norm * query_norm);
+          }
+        }
+        backup_res.emplace_back(nbr.id, dist);
+        full_retset.pop();
+        next_count++;
+      }
+    }
+
+    void move_last_full_retset_to_backup() {
+      while (!full_retset.empty()) {
+        auto &nbr = full_retset.top();
+        backup_res.emplace_back(nbr.id, nbr.distance);
+        full_retset.pop();
+      }
+    }
+
+    uint64_t q_dim = 0;
+    uint64_t lsearch = 0;
+    uint64_t beam_width = 0;
+    float    filter_ratio = 0;
+    Metric   metric;
+    float    alpha = 0;
+    float    acc_alpha = 0;
+    bool     for_tuning = false;
+    bool     initialized = false;
+
+    T                         *aligned_query_T = nullptr;
+    float                     *aligned_query_float = nullptr;
+    tsl::robin_set<_u64>      *visited = nullptr;
+    float                      query_norm = 0.0f;
+    float                      max_base_norm = 0.0f;
+    std::vector<unsigned>      frontier;
+    std::vector<AlignedRead>   frontier_read_reqs;
+    const knowhere::BitsetView bitset;
+
+    std::vector<std::pair<unsigned, char *>> frontier_nhoods;
+    std::vector<std::pair<unsigned, std::pair<unsigned, unsigned *>>>
+        cached_nhoods;
+
+    struct MinHeapCompareNeighbor {
+      bool operator()(const Neighbor &a, const Neighbor &b) {
+        return a.distance > b.distance;
+      }
+    };
+    struct MinHeapCompareSimpleNeighbor {
+      bool operator()(const SimpleNeighbor &a, const SimpleNeighbor &b) {
+        return a.distance > b.distance;
+      }
+    };
+
+    std::priority_queue<SimpleNeighbor, std::vector<SimpleNeighbor>,
+                        MinHeapCompareSimpleNeighbor>
+        full_retset;
+    std::priority_queue<SimpleNeighbor, std::vector<SimpleNeighbor>,
+                        MinHeapCompareSimpleNeighbor>
+        retset;
+    std::priority_queue<SimpleNeighbor, std::vector<SimpleNeighbor>,
+                        MinHeapCompareSimpleNeighbor>
+        candidates;
+
+    size_t good_pq_res_count = 0;
+    size_t next_count = 0;
+
+    std::vector<knowhere::DistId> backup_res;
+  };
+
   template<typename T>
   class PQFlashIndex {
    public:
@@ -129,6 +397,13 @@ namespace diskann {
     size_t get_num_medoids() const noexcept;
 
     diskann::Metric get_metric() const noexcept;
+
+    void getIteratorNextBatch(IteratorWorkspace<T> *workspace);
+
+    std::unique_ptr<IteratorWorkspace<T>> getIteratorWorkspace(
+        const T *query_data, const uint64_t lsearch, const uint64_t beam_width,
+        const bool use_reorder_data, const float filter_ratio,
+        const bool for_tuning, const knowhere::BitsetView &bitset);
 
     _u64 cal_size();
 
@@ -226,8 +501,8 @@ namespace diskann {
     // chunk_size = chunk size of each dimension chunk
     // pq_tables = float* [[2^8 * [chunk_size]] * n_chunks]
     std::unique_ptr<_u8[]> data = nullptr;
-    _u64              n_chunks;
-    FixedChunkPQTable pq_table;
+    _u64                   n_chunks;
+    FixedChunkPQTable      pq_table;
 
     // distance comparator
     DISTFUN<T>     dist_cmp;

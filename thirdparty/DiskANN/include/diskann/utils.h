@@ -84,14 +84,14 @@ typedef uint8_t  _u8;
 typedef int8_t   _s8;
 inline void      open_file_to_write(std::ofstream&     writer,
                                     const std::string& filename) {
-       writer.exceptions(std::ofstream::failbit | std::ofstream::badbit);
-       if (!file_exists(filename))
+  writer.exceptions(std::ofstream::failbit | std::ofstream::badbit);
+  if (!file_exists(filename))
     writer.open(filename, std::ios::binary | std::ios::out);
   else
     writer.open(filename, std::ios::binary | std::ios::in | std::ios::out);
 
   if (writer.fail()) {
-         char buff[1024];
+    char buff[1024];
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-result"
     strerror_r(errno, buff, 1024);
@@ -261,8 +261,8 @@ namespace diskann {
   }
 
   template<typename T>
-  inline void load_bin(const std::string& bin_file, std::unique_ptr<T[]>& data, size_t& npts,
-                       size_t& dim) {
+  inline void load_bin(const std::string& bin_file, std::unique_ptr<T[]>& data,
+                       size_t& npts, size_t& dim) {
     // OLS
     //_u64            read_blk_size = 64 * 1024 * 1024;
     // cached_ifstream reader(bin_file, read_blk_size);
@@ -332,11 +332,13 @@ namespace diskann {
     }
 
     ids = std::make_unique<uint32_t[]>(npts * dim);
-    reader.read(reinterpret_cast<char*>(ids.get()), npts * dim * sizeof(uint32_t));
+    reader.read(reinterpret_cast<char*>(ids.get()),
+                npts * dim * sizeof(uint32_t));
 
     if (truthset_type == 1) {
       dists = std::make_unique<float[]>(npts * dim);
-      reader.read(reinterpret_cast<char*>(dists.get()), npts * dim * sizeof(float));
+      reader.read(reinterpret_cast<char*>(dists.get()),
+                  npts * dim * sizeof(float));
     }
   }
 
@@ -353,7 +355,7 @@ namespace diskann {
     reader.read((char*) &npts_i32, sizeof(int));
     reader.read((char*) &dim_i32, sizeof(int));
     npts = (unsigned) npts_i32;
-    _u64   dim = (unsigned) dim_i32;
+    _u64 dim = (unsigned) dim_i32;
 
     LOG_KNOWHERE_DEBUG_ << "Metadata: #pts = " << npts << ", #dims = " << dim
                         << "... ";
@@ -379,12 +381,14 @@ namespace diskann {
     }
 
     auto ids = std::make_unique<_u32[]>(npts * dim);
-    reader.read(reinterpret_cast<char*>(ids.get()), npts * dim * sizeof(uint32_t));
+    reader.read(reinterpret_cast<char*>(ids.get()),
+                npts * dim * sizeof(uint32_t));
     std::unique_ptr<float[]> dists = nullptr;
 
     if (truthset_type == 1) {
       dists = std::make_unique<float[]>(npts * dim);
-      reader.read(reinterpret_cast<char*>(dists.get()), npts * dim * sizeof(float));
+      reader.read(reinterpret_cast<char*>(dists.get()),
+                  npts * dim * sizeof(float));
     }
     float min_dist = std::numeric_limits<float>::max();
     float max_dist = 0;
