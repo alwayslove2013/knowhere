@@ -111,6 +111,64 @@ TEST_CASE("Valid diskann build params test", "[diskann]") {
     }
 }
 
+TEST_CASE("tmp test", "[diskann]") {
+    knowhere::Json json;
+    json["dim"] = 768;
+    json["metric_type"] = "COSINE";
+    json["k"] = 100;
+    json["index_prefix"] = "tmp_1";
+    json["radius"] = 0.0f;
+    json["range_search_k"] = 100;
+    json["search_list_size"] = 10;
+
+    std::shared_ptr<knowhere::FileManager> file_manager = std::make_shared<knowhere::LocalFileManager>();
+    auto diskann_index_pack = knowhere::Pack(file_manager);
+    knowhere::Index<knowhere::IndexNode> diskann =
+        knowhere::IndexFactory::Instance().Create<knowhere::fp32>("DISKANN", 7, diskann_index_pack).value();
+    knowhere::BinarySet binset;
+    diskann.Deserialize(binset, json);
+    std::cout << "count: " << diskann.Count() << std::endl;
+
+    
+
+    for (int i = 0; i < 10; i++) {
+        auto query_ds = GentmpQueryDataSet();
+        auto knn_res = diskann.Search(query_ds, json, nullptr);
+        REQUIRE(knn_res.has_value());
+        auto knn_dis = knn_res.value()->GetDistance();
+        auto knn_ids = knn_res.value()->GetIds();
+        std::cout << "knn_id: " << knn_ids[0] << ", " << knn_ids[1] << ", " << knn_ids[2] << ", " << knn_ids[3] << ", "
+                  << knn_ids[4] << std::endl;
+        std::cout << "knn_dis: " << knn_dis[0] << ", " << knn_dis[1] << ", " << knn_dis[2] << ", " << knn_dis[3] << ", "
+                  << knn_dis[4] << std::endl;
+
+        auto rs_res = diskann.RangeSearch(query_ds, json, nullptr);
+        auto rs_dis = rs_res.value()->GetDistance();
+        auto rs_ids = rs_res.value()->GetIds();
+        std::cout << "rs_id: " << rs_ids[0] << ", " << rs_ids[1] << ", " << rs_ids[2] << ", " << rs_ids[3] << ", "
+                  << rs_ids[4] << std::endl;
+        std::cout << "rs_dis: " << rs_dis[0] << ", " << rs_dis[1] << ", " << rs_dis[2] << ", " << rs_dis[3] << ", "
+                  << rs_dis[4] << std::endl;
+
+        auto iter_res = diskann.AnnIterator(query_ds, json, nullptr, false);
+        query_ds = nullptr;  // release query_ds
+        auto iter = iter_res.value()[0];
+        size_t count = 0;
+        std::cout << "iter result: ";
+        while (iter->HasNext()) {
+            auto next = iter->Next();
+            std::cout << next.first << "(" << next.second << "), ";
+            count++;
+            if (count > 1000) {
+                break;
+            }
+        }
+        std::cout << std::endl;
+
+        std::cout << "--------------------------------" << std::endl;
+    }
+}
+
 TEST_CASE("Invalid diskann params test", "[diskann]") {
     fs::remove_all(kDir);
     fs::remove(kDir);
