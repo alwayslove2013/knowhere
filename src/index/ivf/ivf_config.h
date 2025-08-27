@@ -29,6 +29,8 @@ class IvfConfig : public BaseConfig {
     CFG_BOOL use_elkan;
     CFG_BOOL ensure_topk_full;  // internal config, used for temp index
     CFG_INT max_empty_result_buckets;
+    CFG_BOOL record_bucket_stats;
+    CFG_STRING bucket_stats_file;
     KNOHWERE_DECLARE_CONFIG(IvfConfig) {
         KNOWHERE_CONFIG_DECLARE_FIELD(nlist)
             .description("number of inverted lists.")
@@ -55,6 +57,14 @@ class IvfConfig : public BaseConfig {
             .description("the maximum of continuous buckets with empty result")
             .for_range_search()
             .set_range(1, 65536);
+        KNOWHERE_CONFIG_DECLARE_FIELD(record_bucket_stats)
+            .set_default(false)
+            .description("whether to record bucket statistics after build")
+            .for_train();
+        KNOWHERE_CONFIG_DECLARE_FIELD(bucket_stats_file)
+            .set_default("bucket_stats.csv")
+            .description("file path to save bucket statistics")
+            .for_train();
     }
 };
 

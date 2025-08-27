@@ -9,6 +9,10 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+
 #include "common/metric.h"
 #include "faiss/IndexBinaryFlat.h"
 #include "faiss/IndexBinaryIVF.h"
@@ -326,6 +330,28 @@ class IvfIndexNode : public IndexNode {
     Status
     TrainInternal(const DataSetPtr dataset, std::shared_ptr<Config> cfg);
 
+    // Bucket statistics helper functions
+    void
+    RecordBucketStatistics(const DataSetPtr dataset, std::shared_ptr<Config> cfg) const;
+
+    template <typename T>
+    std::vector<float>
+    CalculateBucketDistances(const std::vector<T>& bucket_vectors, const std::vector<T>& centroids, int64_t bucket_id,
+                             int64_t dim, const std::string& metric_type) const;
+
+    void
+    WriteBucketStatsToFile(const std::string& filename, const std::vector<std::vector<float>>& all_bucket_distances,
+                           int64_t nlist) const;
+
+    float
+    CalculatePercentile(const std::vector<float>& values, float percentile) const;
+
+    float
+    CalculateSkewness(const std::vector<float>& values) const;
+
+    float
+    CalculateKurtosis(const std::vector<float>& values) const;
+
     static constexpr bool
     IsQuantized() {
         return std::is_same_v<IndexType, faiss::IndexIVFPQ> ||
@@ -394,6 +420,266 @@ class IvfIndexNode : public IndexNode {
     // threads in build_pool_.
     std::shared_ptr<ThreadPool> build_pool_;
 };
+
+// Bucket statistics implementation
+template <typename DataType, typename IndexType>
+void
+IvfIndexNode<DataType, IndexType>::RecordBucketStatistics(const DataSetPtr dataset, std::shared_ptr<Config> cfg) const {
+    // Only support standard IVF indexes for bucket statistics
+    if constexpr (!std::is_same_v<IndexType, faiss::IndexIVFFlat> &&
+                  !std::is_same_v<IndexType, faiss::IndexIVFFlatCC> &&
+                  !std::is_same_v<IndexType, faiss::IndexIVFPQ> &&
+                  !std::is_same_v<IndexType, faiss::IndexIVFScalarQuantizer>) {
+        LOG_KNOWHERE_WARNING_ << "Bucket statistics not supported for this index type";
+        return;
+    }
+
+    if (!index_) {
+        LOG_KNOWHERE_WARNING_ << "Cannot record bucket statistics on empty index";
+        return;
+    }
+
+    const IvfConfig& ivf_cfg = static_cast<const IvfConfig&>(*cfg);
+    std::string filename = ivf_cfg.bucket_stats_file.value();
+
+    LOG_KNOWHERE_INFO_ << "Recording bucket statistics to file: " << filename;
+
+    try {
+        // Get centroids from quantizer
+        const float* centroids = nullptr;
+        int64_t nlist = 0;
+        int64_t dim = 0;
+
+        if constexpr (std::is_same_v<IndexType, faiss::IndexIVFFlat> ||
+                      std::is_same_v<IndexType, faiss::IndexIVFFlatCC> ||
+                      std::is_same_v<IndexType, faiss::IndexIVFPQ> ||
+                      std::is_same_v<IndexType, faiss::IndexIVFScalarQuantizer>) {
+            // For standard IVF indexes
+            auto ivf_index = static_cast<const faiss::IndexIVF*>(index_.get());
+            auto flat_quantizer = static_cast<const faiss::IndexFlat*>(ivf_index->quantizer);
+            centroids = static_cast<const float*>(flat_quantizer->get_xb());
+            nlist = ivf_index->nlist;
+            dim = ivf_index->d;
+        }
+
+        if (centroids == nullptr || nlist == 0 || dim == 0) {
+            LOG_KNOWHERE_WARNING_ << "Invalid index state for bucket statistics";
+            return;
+        }
+
+        // Get all bucket distances
+        std::vector<std::vector<float>> all_bucket_distances(nlist);
+
+        // Process each bucket
+        for (int64_t bucket_id = 0; bucket_id < nlist; ++bucket_id) {
+            // Get vectors in this bucket
+            size_t list_size = 0;
+            const faiss::idx_t* ids = nullptr;
+
+            if constexpr (std::is_same_v<IndexType, faiss::IndexIVFFlat> ||
+                          std::is_same_v<IndexType, faiss::IndexIVFFlatCC> ||
+                          std::is_same_v<IndexType, faiss::IndexIVFPQ> ||
+                          std::is_same_v<IndexType, faiss::IndexIVFScalarQuantizer>) {
+                auto ivf_index = static_cast<const faiss::IndexIVF*>(index_.get());
+                list_size = ivf_index->invlists->list_size(bucket_id);
+                if (list_size == 0) continue;
+                ids = ivf_index->invlists->get_ids(bucket_id);
+            }
+
+            if (list_size == 0 || ids == nullptr) continue;
+
+            // Calculate distances for vectors in this bucket
+            std::vector<float> bucket_distances;
+            bucket_distances.reserve(list_size);
+
+            // Get the centroid for this bucket
+            const float* centroid = centroids + bucket_id * dim;
+
+            // Process each vector in the bucket
+            for (size_t i = 0; i < list_size; ++i) {
+                int64_t id = ids[i];
+                if (id >= dataset->GetRows()) {
+                    continue;
+                }
+
+                // Get vector data
+                const DataType* vector_data = static_cast<const DataType*>(dataset->GetTensor()) + id * dim;
+
+                // Calculate distance to centroid
+                float distance = 0.0f;
+                if (ivf_cfg.metric_type.value() == metric::L2) {
+                    for (int64_t j = 0; j < dim; ++j) {
+                        float diff = static_cast<float>(vector_data[j]) - centroid[j];
+                        distance += diff * diff;
+                    }
+                    distance = std::sqrt(distance);
+                } else if (ivf_cfg.metric_type.value() == metric::IP) {
+                    for (int64_t j = 0; j < dim; ++j) {
+                        distance += static_cast<float>(vector_data[j]) * centroid[j];
+                    }
+                    distance = -distance;  // Convert to distance (lower is better)
+                } else if (ivf_cfg.metric_type.value() == metric::COSINE) {
+                    float dot_product = 0.0f;
+                    float norm1 = 0.0f;
+                    float norm2 = 0.0f;
+                    for (int64_t j = 0; j < dim; ++j) {
+                        dot_product += static_cast<float>(vector_data[j]) * centroid[j];
+                        norm1 += static_cast<float>(vector_data[j]) * static_cast<float>(vector_data[j]);
+                        norm2 += centroid[j] * centroid[j];
+                    }
+                    norm1 = std::sqrt(norm1);
+                    norm2 = std::sqrt(norm2);
+                    if (norm1 > 0 && norm2 > 0) {
+                        distance = 1.0f - (dot_product / (norm1 * norm2));
+                    } else {
+                        distance = 1.0f;
+                    }
+                }
+
+                bucket_distances.push_back(distance);
+            }
+
+            all_bucket_distances[bucket_id] = std::move(bucket_distances);
+        }
+
+        // Write statistics to file
+        WriteBucketStatsToFile(filename, all_bucket_distances, nlist);
+
+        LOG_KNOWHERE_INFO_ << "Bucket statistics recorded successfully to: " << filename;
+
+    } catch (const std::exception& e) {
+        LOG_KNOWHERE_WARNING_ << "Failed to record bucket statistics: " << e.what();
+    }
+}
+
+template <typename DataType, typename IndexType>
+void
+IvfIndexNode<DataType, IndexType>::WriteBucketStatsToFile(const std::string& filename,
+                                                         const std::vector<std::vector<float>>& all_bucket_distances,
+                                                         int64_t nlist) const {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        LOG_KNOWHERE_ERROR_ << "Cannot open file for writing: " << filename;
+        return;
+    }
+
+    // Write header
+    file << "bucket_id,vector_count,min_distance,max_distance,percentile_25,percentile_50,percentile_75,skewness,"
+            "kurtosis\n";
+
+    // Write statistics for each bucket
+    for (int64_t bucket_id = 0; bucket_id < nlist; ++bucket_id) {
+        const auto& distances = all_bucket_distances[bucket_id];
+
+        if (distances.empty()) {
+            file << bucket_id << ",0,0,0,0,0,0,0,0\n";
+            continue;
+        }
+
+        // Sort distances for percentile calculation
+        std::vector<float> sorted_distances = distances;
+        std::sort(sorted_distances.begin(), sorted_distances.end());
+
+        // Calculate statistics
+        float min_dist = sorted_distances.front();
+        float max_dist = sorted_distances.back();
+        float p25 = CalculatePercentile(sorted_distances, 25.0f);
+        float p50 = CalculatePercentile(sorted_distances, 50.0f);
+        float p75 = CalculatePercentile(sorted_distances, 75.0f);
+        float skewness = CalculateSkewness(sorted_distances);
+        float kurtosis = CalculateKurtosis(sorted_distances);
+
+        // Write to file
+        file << bucket_id << "," << distances.size() << "," << min_dist << "," << max_dist << "," << p25 << "," << p50
+             << "," << p75 << "," << skewness << "," << kurtosis << "\n";
+    }
+
+    file.close();
+}
+
+template <typename DataType, typename IndexType>
+float
+IvfIndexNode<DataType, IndexType>::CalculatePercentile(const std::vector<float>& values, float percentile) const {
+    if (values.empty())
+        return 0.0f;
+
+    float rank = (percentile / 100.0f) * (values.size() - 1);
+    int lower_idx = static_cast<int>(std::floor(rank));
+    int upper_idx = static_cast<int>(std::ceil(rank));
+
+    if (lower_idx == upper_idx) {
+        return values[lower_idx];
+    }
+
+    float weight = rank - lower_idx;
+    return values[lower_idx] * (1.0f - weight) + values[upper_idx] * weight;
+}
+
+template <typename DataType, typename IndexType>
+float
+IvfIndexNode<DataType, IndexType>::CalculateSkewness(const std::vector<float>& values) const {
+    if (values.size() < 3)
+        return 0.0f;
+
+    // Calculate mean
+    float sum = 0.0f;
+    for (float val : values) {
+        sum += val;
+    }
+    float mean = sum / values.size();
+
+    // Calculate variance and third moment
+    float variance = 0.0f;
+    float third_moment = 0.0f;
+    for (float val : values) {
+        float diff = val - mean;
+        variance += diff * diff;
+        third_moment += diff * diff * diff;
+    }
+    variance /= values.size();
+    third_moment /= values.size();
+
+    if (variance == 0.0f)
+        return 0.0f;
+
+    float std_dev = std::sqrt(variance);
+    return (third_moment / (std_dev * std_dev * std_dev)) * std::sqrt(values.size() * (values.size() - 1)) /
+           (values.size() - 2);
+}
+
+template <typename DataType, typename IndexType>
+float
+IvfIndexNode<DataType, IndexType>::CalculateKurtosis(const std::vector<float>& values) const {
+    if (values.size() < 4)
+        return 0.0f;
+
+    // Calculate mean
+    float sum = 0.0f;
+    for (float val : values) {
+        sum += val;
+    }
+    float mean = sum / values.size();
+
+    // Calculate variance and fourth moment
+    float variance = 0.0f;
+    float fourth_moment = 0.0f;
+    for (float val : values) {
+        float diff = val - mean;
+        variance += diff * diff;
+        fourth_moment += diff * diff * diff * diff;
+    }
+    variance /= values.size();
+    fourth_moment /= values.size();
+
+    if (variance == 0.0f)
+        return 0.0f;
+
+    float kurtosis = (fourth_moment / (variance * variance)) - 3.0f;
+
+    // Apply finite sample correction
+    float n = static_cast<float>(values.size());
+    return kurtosis * (n + 1) * n / ((n - 1) * (n - 2) * (n - 3)) + 6.0f / ((n - 2) * (n - 3));
+}
 
 }  // namespace knowhere
 
@@ -725,6 +1011,13 @@ IvfIndexNode<DataType, IndexType>::Add(const DataSetPtr dataset, std::shared_ptr
         LOG_KNOWHERE_WARNING_ << "faiss internal error: " << tryObj.exception().what();
         return Status::faiss_inner_error;
     }
+
+    // Record bucket statistics if enabled
+    const IvfConfig& ivf_cfg = static_cast<const IvfConfig&>(*cfg);
+    if (ivf_cfg.record_bucket_stats.has_value() && ivf_cfg.record_bucket_stats.value()) {
+        RecordBucketStatistics(dataset, cfg);
+    }
+
     return Status::success;
 }
 

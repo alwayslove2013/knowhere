@@ -128,6 +128,8 @@ constexpr const char* RAW_DATA_STORE_PREFIX = "raw_data_store_prefix";
 constexpr const char* SUB_DIM = "sub_dim";
 constexpr const char* REFINE_TYPE = "refine_type";
 constexpr const char* REFINE_WITH_QUANT = "refine_with_quant";
+constexpr const char* RECORD_BUCKET_STATS = "record_bucket_stats";
+constexpr const char* BUCKET_STATS_FILE = "bucket_stats_file";
 
 // cuVS Params
 constexpr const char* REFINE_RATIO = "refine_ratio";
