@@ -482,11 +482,13 @@ IvfIndexNode<DataType, IndexType>::RecordBucketStatistics(const DataSetPtr datas
                           std::is_same_v<IndexType, faiss::IndexIVFScalarQuantizer>) {
                 auto ivf_index = static_cast<const faiss::IndexIVF*>(index_.get());
                 list_size = ivf_index->invlists->list_size(bucket_id);
-                if (list_size == 0) continue;
+                if (list_size == 0)
+                    continue;
                 ids = ivf_index->invlists->get_ids(bucket_id);
             }
 
-            if (list_size == 0 || ids == nullptr) continue;
+            if (list_size == 0 || ids == nullptr)
+                continue;
 
             // Calculate distances for vectors in this bucket
             std::vector<float> bucket_distances;
@@ -555,8 +557,8 @@ IvfIndexNode<DataType, IndexType>::RecordBucketStatistics(const DataSetPtr datas
 template <typename DataType, typename IndexType>
 void
 IvfIndexNode<DataType, IndexType>::WriteBucketStatsToFile(const std::string& filename,
-                                                         const std::vector<std::vector<float>>& all_bucket_distances,
-                                                         int64_t nlist) const {
+                                                          const std::vector<std::vector<float>>& all_bucket_distances,
+                                                          int64_t nlist) const {
     std::ofstream file(filename);
     if (!file.is_open()) {
         LOG_KNOWHERE_ERROR_ << "Cannot open file for writing: " << filename;
@@ -1040,12 +1042,22 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
 
     const IvfConfig& ivf_cfg = static_cast<const IvfConfig&>(*cfg);
     bool is_cosine = IsMetricType(ivf_cfg.metric_type.value(), knowhere::metric::COSINE);
+    bool return_visited_buckets = ivf_cfg.return_visited_buckets.value_or(false);
 
     auto k = ivf_cfg.k.value();
     auto nprobe = ivf_cfg.nprobe.value();
 
     auto ids = std::make_unique<int64_t[]>(rows * k);
     auto distances = std::make_unique<float[]>(rows * k);
+
+    // Store visited bucket ids for each query if requested
+    std::vector<std::vector<int64_t>> visited_bucket_ids;
+    std::vector<std::vector<float>> visited_bucket_distances;
+    if (return_visited_buckets) {
+        visited_bucket_ids.resize(rows);
+        visited_bucket_distances.resize(rows);
+    }
+
     try {
         std::vector<folly::Future<folly::Unit>> futs;
         futs.reserve(rows);
@@ -1066,6 +1078,26 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
                     faiss::IVFSearchParameters ivf_search_params;
                     ivf_search_params.nprobe = nprobe;
                     ivf_search_params.sel = id_selector;
+
+                    // For binary IVF, we need to do coarse search manually to get bucket ids
+                    if (return_visited_buckets) {
+                        auto ivf_index = static_cast<const faiss::IndexBinaryIVF*>(index_.get());
+                        std::unique_ptr<int64_t[]> coarse_ids(new int64_t[nprobe]);
+                        std::unique_ptr<int32_t[]> coarse_dis(new int32_t[nprobe]);
+
+                        ivf_index->quantizer->search(1, cur_data, nprobe, coarse_dis.get(), coarse_ids.get());
+
+                        // Store visited bucket ids and distances
+                        visited_bucket_ids[index].reserve(nprobe);
+                        visited_bucket_distances[index].reserve(nprobe);
+                        for (int64_t j = 0; j < nprobe; ++j) {
+                            if (coarse_ids[j] >= 0) {
+                                visited_bucket_ids[index].push_back(coarse_ids[j]);
+                                visited_bucket_distances[index].push_back(static_cast<float>(coarse_dis[j]));
+                            }
+                        }
+                    }
+
                     index_->search(1, cur_data, k, i_distances + offset, ids.get() + offset, &ivf_search_params);
 
                     if (index_->metric_type == faiss::METRIC_Hamming) {
@@ -1096,6 +1128,42 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
                         ivf_search_params.max_codes = 0;
                     }
 
+                    // For IVF with ensure_topk_full, we need to do coarse search manually
+                    if (return_visited_buckets && ivf_search_params.ensure_topk_full) {
+                        auto ivf_index = static_cast<const faiss::IndexIVF*>(index_.get());
+                        std::unique_ptr<int64_t[]> coarse_ids(new int64_t[ivf_index->nlist]);
+                        std::unique_ptr<float[]> coarse_dis(new float[ivf_index->nlist]);
+
+                        ivf_index->quantizer->search(1, cur_query, ivf_index->nlist, coarse_dis.get(),
+                                                     coarse_ids.get());
+
+                        // Store visited bucket ids and distances
+                        visited_bucket_ids[index].reserve(ivf_index->nlist);
+                        visited_bucket_distances[index].reserve(ivf_index->nlist);
+                        for (int64_t j = 0; j < ivf_index->nlist; ++j) {
+                            if (coarse_ids[j] >= 0) {
+                                visited_bucket_ids[index].push_back(coarse_ids[j]);
+                                visited_bucket_distances[index].push_back(coarse_dis[j]);
+                            }
+                        }
+                    } else if (return_visited_buckets) {
+                        auto ivf_index = static_cast<const faiss::IndexIVF*>(index_.get());
+                        std::unique_ptr<int64_t[]> coarse_ids(new int64_t[nprobe]);
+                        std::unique_ptr<float[]> coarse_dis(new float[nprobe]);
+
+                        ivf_index->quantizer->search(1, cur_query, nprobe, coarse_dis.get(), coarse_ids.get());
+
+                        // Store visited bucket ids and distances
+                        visited_bucket_ids[index].reserve(nprobe);
+                        visited_bucket_distances[index].reserve(nprobe);
+                        for (int64_t j = 0; j < nprobe; ++j) {
+                            if (coarse_ids[j] >= 0) {
+                                visited_bucket_ids[index].push_back(coarse_ids[j]);
+                                visited_bucket_distances[index].push_back(coarse_dis[j]);
+                            }
+                        }
+                    }
+
                     index_->search(1, cur_query, k, distances.get() + offset, ids.get() + offset, &ivf_search_params);
                 } else if constexpr (std::is_same<IndexType, faiss::IndexScaNN>::value) {
                     auto cur_query = (const float*)data + index * dim;
@@ -1105,7 +1173,7 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
                         cur_query = copied_query.get();
                     }
 
-                    // todo aguzhva: this is somewhat alogical. Refactor?
+                    // todo aguzhova: this is somewhat alogical. Refactor?
                     faiss::IVFSearchParameters base_search_params;
                     base_search_params.sel = id_selector;
                     base_search_params.nprobe = nprobe;
@@ -1123,6 +1191,27 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
                     } else {
                         base_search_params.nprobe = nprobe;
                         base_search_params.max_codes = 0;
+                    }
+
+                    // For ScaNN, we need to do coarse search manually to get bucket ids
+                    if (return_visited_buckets) {
+                        if (auto base_index_ptr = reinterpret_cast<faiss::IndexIVFPQFastScan*>(index_->base_index)) {
+                            auto nlist = base_index_ptr->nlist;
+                            std::unique_ptr<int64_t[]> coarse_ids(new int64_t[nlist]);
+                            std::unique_ptr<float[]> coarse_dis(new float[nlist]);
+
+                            base_index_ptr->quantizer->search(1, cur_query, nlist, coarse_dis.get(), coarse_ids.get());
+
+                            // Store visited bucket ids and distances
+                            visited_bucket_ids[index].reserve(nlist);
+                            visited_bucket_distances[index].reserve(nlist);
+                            for (int64_t j = 0; j < nlist; ++j) {
+                                if (coarse_ids[j] >= 0) {
+                                    visited_bucket_ids[index].push_back(coarse_ids[j]);
+                                    visited_bucket_distances[index].push_back(coarse_dis[j]);
+                                }
+                            }
+                        }
                     }
 
                     faiss::IndexScaNNSearchParameters scann_search_params;
@@ -1155,6 +1244,25 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
                     ivf_search_params.sel = id_selector;
                     ivf_search_params.qb = ivf_rabitq_cfg.rbq_bits_query.value_or(0);
 
+                    // For IVF RaBitQ, we need to do coarse search manually to get bucket ids
+                    if (return_visited_buckets) {
+                        const faiss::IndexIVFRaBitQ* uindex_ = index_->get_ivfrabitq_index();
+                        std::unique_ptr<int64_t[]> coarse_ids(new int64_t[uindex_->nlist]);
+                        std::unique_ptr<float[]> coarse_dis(new float[uindex_->nlist]);
+
+                        uindex_->quantizer->search(1, cur_query, uindex_->nlist, coarse_dis.get(), coarse_ids.get());
+
+                        // Store visited bucket ids and distances
+                        visited_bucket_ids[index].reserve(uindex_->nlist);
+                        visited_bucket_distances[index].reserve(uindex_->nlist);
+                        for (int64_t j = 0; j < uindex_->nlist; ++j) {
+                            if (coarse_ids[j] >= 0) {
+                                visited_bucket_ids[index].push_back(coarse_ids[j]);
+                                visited_bucket_distances[index].push_back(coarse_dis[j]);
+                            }
+                        }
+                    }
+
                     if (use_refine && whether_to_enable_refine) {
                         // yes, use refine
                         faiss::IndexRefineSearchParameters refine_search_params;
@@ -1181,6 +1289,25 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
                     ivf_search_params.max_codes = 0;
                     ivf_search_params.sel = id_selector;
 
+                    // For standard IVF, we need to do coarse search manually to get bucket ids
+                    if (return_visited_buckets) {
+                        auto ivf_index = static_cast<const faiss::IndexIVF*>(index_.get());
+                        std::unique_ptr<int64_t[]> coarse_ids(new int64_t[nprobe]);
+                        std::unique_ptr<float[]> coarse_dis(new float[nprobe]);
+
+                        ivf_index->quantizer->search(1, cur_query, nprobe, coarse_dis.get(), coarse_ids.get());
+
+                        // Store visited bucket ids and distances
+                        visited_bucket_ids[index].reserve(nprobe);
+                        visited_bucket_distances[index].reserve(nprobe);
+                        for (int64_t j = 0; j < nprobe; ++j) {
+                            if (coarse_ids[j] >= 0) {
+                                visited_bucket_ids[index].push_back(coarse_ids[j]);
+                                visited_bucket_distances[index].push_back(coarse_dis[j]);
+                            }
+                        }
+                    }
+
                     index_->search(1, cur_query, k, distances.get() + offset, ids.get() + offset, &ivf_search_params);
                 }
             }));
@@ -1193,6 +1320,27 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
     }
 
     auto res = GenResultDataSet(rows, k, std::move(ids), std::move(distances));
+
+    // Add visited bucket ids to the result if requested
+    if (return_visited_buckets) {
+        // Convert visited bucket ids to a flat array with limits
+        std::vector<int64_t> flat_bucket_ids;
+        std::vector<float> flat_bucket_distances;
+
+        for (const auto& bucket_ids : visited_bucket_ids) {
+            flat_bucket_ids.insert(flat_bucket_ids.end(), bucket_ids.begin(), bucket_ids.end());
+        }
+        
+        for (const auto& bucket_distances : visited_bucket_distances) {
+            flat_bucket_distances.insert(flat_bucket_distances.end(), bucket_distances.begin(), bucket_distances.end());
+        }
+
+        // Set the bucket ids and distances in the result dataset
+        // Note: We store the vectors directly to avoid memory leaks
+        res->Set(meta::VISITED_BUCKET_IDS, flat_bucket_ids);
+        res->Set(meta::VISITED_BUCKET_DISTANCES, flat_bucket_distances);
+    }
+
     return res;
 }
 

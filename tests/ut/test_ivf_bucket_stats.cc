@@ -31,17 +31,19 @@ TEST_CASE("Test IVF Bucket Statistics", "Record") {
     int64_t dim = 128;
     int64_t seed = 42;
     int64_t top_k = 100;
+    int64_t nprobe = 16;
 
     knowhere::Json json;
     json[knowhere::meta::METRIC_TYPE] = metric;
     json[knowhere::meta::INDEX_TYPE] = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT;
     json[knowhere::meta::DIM] = dim;
     json[knowhere::indexparam::NLIST] = 123;
-    json[knowhere::indexparam::NPROBE] = 16;
+    json[knowhere::indexparam::NPROBE] = nprobe;
     json[knowhere::indexparam::RECORD_BUCKET_STATS] = true;
     json[knowhere::indexparam::BUCKET_STATS_FILE] = "bucket_stats.csv";
+    json[knowhere::indexparam::RETURN_VISITED_BUCKETS] = true;
 
-    SECTION("Simple") {
+    SECTION("Simple Train") {
         auto train_ds = GenDataSet(nb, dim, seed);
         auto idx = knowhere::IndexFactory::Instance()
                        .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, version)
@@ -51,5 +53,28 @@ TEST_CASE("Test IVF Bucket Statistics", "Record") {
         REQUIRE(idx.Type() == knowhere::IndexEnum::INDEX_FAISS_IVFFLAT);
         REQUIRE(idx.HasRawData(metric) == knowhere::IndexStaticFaced<knowhere::fp32>::HasRawData(
                                               knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, version, json));
+    }
+
+    SECTION("Simple Search") {
+        auto train_ds = GenDataSet(nb, dim, seed);
+        auto idx = knowhere::IndexFactory::Instance()
+                       .Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, version)
+                       .value();
+        auto build_res = idx.Build(train_ds, json);
+        REQUIRE(build_res == knowhere::Status::success);
+        REQUIRE(idx.Type() == knowhere::IndexEnum::INDEX_FAISS_IVFFLAT);
+
+        auto search_ds = GenDataSet(nq, dim, seed);
+        auto search_res = idx.Search(search_ds, json, nullptr).value();
+        auto visited_bucket_ids = search_res->Get<std::vector<int64_t>>(knowhere::meta::VISITED_BUCKET_IDS);
+
+        json[knowhere::indexparam::NPROBE] = nprobe * 2;
+        auto search_res_2 = idx.Search(search_ds, json, nullptr).value();
+        auto visited_bucket_ids_2 = search_res_2->Get<std::vector<int64_t>>(knowhere::meta::VISITED_BUCKET_IDS);
+        for (size_t i = 0; i < nq; i++) {
+            for (size_t j = 0; j < nprobe; j++) {
+                REQUIRE(visited_bucket_ids[i * nprobe + j] == visited_bucket_ids_2[i * nprobe * 2 + j]);
+            }
+        }
     }
 }

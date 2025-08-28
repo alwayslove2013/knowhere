@@ -110,6 +110,8 @@ constexpr const char* BM25_B = "bm25_b";
 // average document length
 constexpr const char* BM25_AVGDL = "bm25_avgdl";
 constexpr const char* DIM_MAX_SCORE_RATIO = "dim_max_score_ratio";
+constexpr const char* VISITED_BUCKET_IDS = "visited_bucket_ids";
+constexpr const char* VISITED_BUCKET_DISTANCES = "visited_bucket_distances";
 };  // namespace meta
 
 namespace indexparam {
@@ -130,6 +132,7 @@ constexpr const char* REFINE_TYPE = "refine_type";
 constexpr const char* REFINE_WITH_QUANT = "refine_with_quant";
 constexpr const char* RECORD_BUCKET_STATS = "record_bucket_stats";
 constexpr const char* BUCKET_STATS_FILE = "bucket_stats_file";
+constexpr const char* RETURN_VISITED_BUCKETS = "return_visited_buckets";
 
 // cuVS Params
 constexpr const char* REFINE_RATIO = "refine_ratio";

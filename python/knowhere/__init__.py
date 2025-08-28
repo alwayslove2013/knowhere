@@ -1,6 +1,11 @@
 from . import swigknowhere
 from .swigknowhere import Status
-from .swigknowhere import CreateBinarySet, GetBinarySet, GetNullDataSet, GetNullBitSetView
+from .swigknowhere import (
+    CreateBinarySet,
+    GetBinarySet,
+    GetNullDataSet,
+    GetNullBitSetView,
+)
 from .swigknowhere import BruteForceSearchFloat, BruteForceRangeSearchFloat
 from .swigknowhere import BruteForceSearchFP16, BruteForceRangeSearchFP16
 from .swigknowhere import BruteForceSearchBF16, BruteForceRangeSearchBF16
@@ -23,6 +28,7 @@ def CreateIndex(name, version, type=np.float32):
     if type == np.int8:
         return swigknowhere.IndexWrapInt8(name, version)
 
+
 def BruteForceSearch(type=np.float32, *args):
     if type == np.float32:
         return BruteForceSearchFloat(*args)
@@ -34,6 +40,7 @@ def BruteForceSearch(type=np.float32, *args):
         return BruteForceSearchInt8(*args)
     if type == np.uint8:
         return BruteForceSearchBin(*args)
+
 
 def BruteForceRangeSearch(type=np.float32, *args):
     if type == np.float32:
@@ -67,6 +74,7 @@ def Dump(binset, file_name):
 def WriteIndexToDisk(binset, index_type, data_path):
     return swigknowhere.WriteIndexToDisk(binset, index_type, data_path)
 
+
 def ArrayToBinary(arr):
     if arr.dtype == np.uint8:
         return swigknowhere.Array2Binary(arr)
@@ -75,6 +83,7 @@ def ArrayToBinary(arr):
         ArrayToBinary only support numpy array dtype uint8.
         """
     )
+
 
 def ArrayToDataSet(arr):
     if arr.ndim == 1:
@@ -98,6 +107,7 @@ def ArrayToDataSet(arr):
         """
     )
 
+
 # follow csr_matrix format
 # row i are stored in ``indices[indptr[i]:indptr[i+1]]`` and their
 # corresponding values are stored in ``data[indptr[i]:indptr[i+1]]
@@ -118,8 +128,18 @@ def DataSetToArray(ans):
     rows = swigknowhere.DataSet_Rows(ans)
     dis = np.zeros([rows, dim]).astype(np.float32)
     ids = np.zeros([rows, dim]).astype(np.int32)
+    
     swigknowhere.DataSet2Array(ans, dis, ids)
     return dis, ids
+
+
+def BucketsInfoToArray(ans, nprobe):
+    dim = swigknowhere.DataSet_Dim(ans)
+    rows = swigknowhere.DataSet_Rows(ans)
+    bucket_ids = np.zeros([rows, nprobe]).astype(np.int64)
+    bucket_distances = np.zeros([rows, nprobe]).astype(np.float32)
+    swigknowhere.BucketsInfo2Array(ans, bucket_ids, bucket_distances)
+    return bucket_ids, bucket_distances
 
 
 def RangeSearchDataSetToArray(ans):
@@ -162,6 +182,7 @@ def GetVectorDataSetToArray(ans):
     swigknowhere.DataSetTensor2Array(ans, data)
     return data
 
+
 def GetFloat16VectorDataSetToArray(ans):
     dim = swigknowhere.DataSet_Dim(ans)
     rows = swigknowhere.DataSet_Rows(ans)
@@ -169,6 +190,7 @@ def GetFloat16VectorDataSetToArray(ans):
     swigknowhere.Float16DataSetTensor2Array(ans, data)
     data = data.astype(np.float16)
     return data
+
 
 def GetBFloat16VectorDataSetToArray(ans):
     dim = swigknowhere.DataSet_Dim(ans)
@@ -178,12 +200,14 @@ def GetBFloat16VectorDataSetToArray(ans):
     data = data.astype(bfloat16)
     return data
 
+
 def GetBinaryVectorDataSetToArray(ans):
     dim = int(swigknowhere.DataSet_Dim(ans) / 8)
     rows = swigknowhere.DataSet_Rows(ans)
     data = np.zeros([rows, dim]).astype(np.uint8)
     swigknowhere.BinaryDataSetTensor2Array(ans, data)
     return data
+
 
 def GetInt8VectorDataSetToArray(ans):
     dim = swigknowhere.DataSet_Dim(ans)
@@ -192,11 +216,14 @@ def GetInt8VectorDataSetToArray(ans):
     swigknowhere.Int8DataSetTensor2Array(ans, data)
     return data
 
+
 def SetSimdType(type):
     swigknowhere.SetSimdType(type)
 
+
 def SetBuildThreadPool(num_threads):
     swigknowhere.SetBuildThreadPool(num_threads)
+
 
 def SetSearchThreadPool(num_threads):
     swigknowhere.SetSearchThreadPool(num_threads)

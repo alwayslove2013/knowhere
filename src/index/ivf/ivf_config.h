@@ -31,6 +31,7 @@ class IvfConfig : public BaseConfig {
     CFG_INT max_empty_result_buckets;
     CFG_BOOL record_bucket_stats;
     CFG_STRING bucket_stats_file;
+    CFG_BOOL return_visited_buckets;
     KNOHWERE_DECLARE_CONFIG(IvfConfig) {
         KNOWHERE_CONFIG_DECLARE_FIELD(nlist)
             .description("number of inverted lists.")
@@ -65,6 +66,10 @@ class IvfConfig : public BaseConfig {
             .set_default("bucket_stats.csv")
             .description("file path to save bucket statistics")
             .for_train();
+        KNOWHERE_CONFIG_DECLARE_FIELD(return_visited_buckets)
+            .set_default(false)
+            .description("whether to return visited bucket ids in search results")
+            .for_search();
     }
 };
 

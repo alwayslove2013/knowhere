@@ -88,6 +88,8 @@ import_array();
 %apply (int *INPLACE_ARRAY2, int DIM1, int DIM2){(int *ids,int nq_2,int k_2)}
 %apply (float* INPLACE_ARRAY2, int DIM1, int DIM2){(float *data,int rows,int dim)}
 %apply (int32_t *INPLACE_ARRAY2, int DIM1, int DIM2){(int32_t *data,int rows,int dim)}
+%apply (int64_t *INPLACE_ARRAY2, int DIM1, int DIM2){(int64_t* bucket_ids, int nq_1, int nprobe_1)}
+%apply (float *INPLACE_ARRAY2, int DIM1, int DIM2){(float *bucket_distances, int nq_2, int nprobe_2)}
 
 %typemap(in, numinputs=0) knowhere::Status& status(knowhere::Status tmp) %{
     $1 = &tmp;
@@ -483,6 +485,19 @@ DataSet2Array(knowhere::DataSetPtr result, float* dis, int nq_1, int k_1, int* i
         for (int j = 0; j < k_1; ++j) {
             *(ids + i * k_1 + j) = *((int64_t*)(ids_) + i * k_1 + j);
             *(dis + i * k_1 + j) = *((float*)(dist_) + i * k_1 + j);
+        }
+    }
+}
+
+void
+BucketsInfo2Array(knowhere::DataSetPtr result, int64_t* bucket_ids, int nq_1, int nprobe_1, float* bucket_distances, int nq_2, int nprobe_2) {
+    GILReleaser rel;
+    auto visited_bucket_ids = result->Get<std::vector<int64_t>>(knowhere::meta::VISITED_BUCKET_IDS);
+    auto visited_bucket_distances = result->Get<std::vector<float>>(knowhere::meta::VISITED_BUCKET_DISTANCES);
+    if (!visited_bucket_ids.empty()) {
+        for (size_t i = 0; i < visited_bucket_ids.size(); ++i) {
+            *(bucket_ids + i) = visited_bucket_ids[i];
+            *(bucket_distances + i) = visited_bucket_distances[i];
         }
     }
 }
