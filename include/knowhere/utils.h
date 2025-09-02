@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <numeric>
 #include <vector>
 
 #include "knowhere/binaryset.h"
@@ -300,6 +301,109 @@ load_vec_data(const std::string& bin_file, std::unique_ptr<char[]>& data, size_t
     uint64_t total_size = dim * npts / 8;
     data = std::make_unique<char[]>(total_size);
     file.read(reinterpret_cast<char*>(data.get()), total_size);
+}
+
+inline float
+calc_mean(const std::vector<float>& values) {
+    if (values.empty())
+        return 0.0f;
+    return std::accumulate(values.begin(), values.end(), 0.0f) / values.size();
+}
+
+inline float
+calc_std(const std::vector<float>& values) {
+    if (values.empty())
+        return 0.0f;
+    float mean = calc_mean(values);
+    float variance = 0.0f;
+
+    for (float val : values) {
+        float diff = val - mean;
+        variance += diff * diff;
+    }
+    variance /= values.size();
+    return std::sqrt(variance);
+}
+
+inline float
+calc_percentile(const std::vector<float>& values, float percentile) {
+    if (values.empty())
+        return 0.0f;
+
+    float rank = (percentile / 100.0f) * (values.size() - 1);
+    int lower_idx = static_cast<int>(std::floor(rank));
+    int upper_idx = static_cast<int>(std::ceil(rank));
+
+    if (lower_idx == upper_idx) {
+        return values[lower_idx];
+    }
+
+    float weight = rank - lower_idx;
+    return values[lower_idx] * (1.0f - weight) + values[upper_idx] * weight;
+}
+
+inline float
+calc_skewness(const std::vector<float>& values) {
+    if (values.size() < 3)
+        return 0.0f;
+
+    // Calculate mean
+    float sum = 0.0f;
+    for (float val : values) {
+        sum += val;
+    }
+    float mean = sum / values.size();
+
+    // Calculate variance and third moment
+    float variance = 0.0f;
+    float third_moment = 0.0f;
+    for (float val : values) {
+        float diff = val - mean;
+        variance += diff * diff;
+        third_moment += diff * diff * diff;
+    }
+    variance /= values.size();
+    third_moment /= values.size();
+
+    if (variance == 0.0f)
+        return 0.0f;
+
+    float std_dev = std::sqrt(variance);
+    return (third_moment / (std_dev * std_dev * std_dev)) * std::sqrt(values.size() * (values.size() - 1)) /
+           (values.size() - 2);
+}
+
+inline float
+calc_kurtosis(const std::vector<float>& values) {
+    if (values.size() < 4)
+        return 0.0f;
+
+    // Calculate mean
+    float sum = 0.0f;
+    for (float val : values) {
+        sum += val;
+    }
+    float mean = sum / values.size();
+
+    // Calculate variance and fourth moment
+    float variance = 0.0f;
+    float fourth_moment = 0.0f;
+    for (float val : values) {
+        float diff = val - mean;
+        variance += diff * diff;
+        fourth_moment += diff * diff * diff * diff;
+    }
+    variance /= values.size();
+    fourth_moment /= values.size();
+
+    if (variance == 0.0f)
+        return 0.0f;
+
+    float kurtosis = (fourth_moment / (variance * variance)) - 3.0f;
+
+    // Apply finite sample correction
+    float n = static_cast<float>(values.size());
+    return kurtosis * (n + 1) * n / ((n - 1) * (n - 2) * (n - 3)) + 6.0f / ((n - 2) * (n - 3));
 }
 
 // taken from
