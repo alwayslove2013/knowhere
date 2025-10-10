@@ -468,11 +468,6 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                         GenerateScalarInfoWithStep(nb, partition_num, each_el_len);
 
                     for (const bool mv_only_enable : MV_ONLYs) {
-#ifdef KNOWHERE_WITH_CARDINAL
-                        if (mv_only_enable) {
-                            continue;
-                        }
-#endif
                         printf("with mv only enabled : %d\n", mv_only_enable);
                         if (mv_only_enable) {
                             default_ds_ptr->Set(knowhere::meta::SCALAR_INFO, scalar_info);
