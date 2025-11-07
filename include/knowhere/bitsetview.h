@@ -69,11 +69,11 @@ class BitsetView {
     }
 
     void
-    set_out_ids(const uint32_t* out_ids, size_t num_internal_ids, size_t num_filtered_out_ids = 0) {
+    set_out_ids(const uint32_t* out_ids, size_t num_internal_ids, int32_t num_filtered_out_ids = -1) {
         out_ids_ = out_ids;
         num_internal_ids_ = num_internal_ids;
-        if (num_filtered_out_ids > 0) {
-            num_filtered_out_ids_ = num_filtered_out_ids;
+        if (num_filtered_out_ids >= 0) {
+            num_filtered_out_ids_ = static_cast<size_t>(num_filtered_out_ids);
         } else {
             // auto calculate num_filtered_out_ids if not provided
             num_filtered_out_ids_ = get_filtered_out_num_();
