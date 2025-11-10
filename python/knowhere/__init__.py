@@ -142,6 +142,13 @@ def DataSetToArray(ans):
     return dis, ids
 
 
+def DataSetToArrayWithComputeCnt(ans):
+    dis, ids = DataSetToArray(ans)
+    search_compute_cnt = swigknowhere.DataSet_SearchComputeCnt(ans)
+    refine_compute_cnt = swigknowhere.DataSet_RefineComputeCnt(ans)
+    return dis, ids, search_compute_cnt, refine_compute_cnt
+
+
 def RangeSearchDataSetToArray(ans):
     rows = swigknowhere.DataSet_Rows(ans)
     lims = np.zeros(

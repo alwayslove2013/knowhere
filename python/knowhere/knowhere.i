@@ -471,6 +471,16 @@ DataSet_Dim(knowhere::DataSetPtr results){
     return results->GetDim();
 }
 
+int64_t
+DataSet_SearchComputeCnt(knowhere::DataSetPtr results){
+    return results->Get<int64_t>("search_compute_cnt");
+}
+
+int64_t
+DataSet_RefineComputeCnt(knowhere::DataSetPtr results){
+    return results->Get<int64_t>("refine_compute_cnt");
+}
+
 knowhere::BinarySetPtr
 GetBinarySet() {
     return std::make_shared<knowhere::BinarySet>();
@@ -612,14 +622,18 @@ Dump(knowhere::BinarySetPtr binset, const std::string& file_name) {
             // serialization: name_length(size_t); name(char[]); binset_size(size_t); binset(uint8[]);
             auto name = it->first;
             uint64_t name_len = name.size();
-            outfile << name_len;
-            outfile << name;
+            outfile.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
+            outfile.write(name.c_str(), name_len);
+            printf("name: %s, name_len: %ld\n", name.c_str(), name_len);
             auto value = it->second;
-            outfile << value->size;
-            outfile.write(reinterpret_cast<char*>(value->data.get()), value->size);
+            int64_t size = value->size;
+            outfile.write(reinterpret_cast<const char*>(&size), sizeof(size));
+            printf("size: %ld\n", size);
+            outfile.write(reinterpret_cast<char*>(value->data.get()), size);
         }
         // end with 0
-        outfile << 0;
+        uint64_t zero = 0;
+        outfile.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
         outfile.flush();
     }
 }
@@ -632,19 +646,41 @@ Load(knowhere::BinarySetPtr binset, const std::string& file_name) {
         uint64_t name_len;
         while (true) {
             // deserialization: name_length(size_t); name(char[]); binset_size(size_t); binset(uint8[]);
-            infile >> name_len;
+            infile.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
+            if (infile.gcount() != sizeof(name_len)) {
+                printf("Error: Failed to read name_len\n");
+                break;
+            }
+            printf("name_len: %ld\n", name_len);
             if (name_len == 0) break;
 
             auto _name = new char[name_len];
             infile.read(_name, name_len);
+            if (infile.gcount() != name_len) {
+                delete[] _name;
+                printf("Error: Failed to read name (expected %ld bytes, got %ld)\n", name_len, infile.gcount());
+                break;
+            }
             std::string name(_name, name_len);
+            delete[] _name;
+            printf("name: %s\n", name.c_str());
 
             int64_t size;
-            infile >> size;
+            infile.read(reinterpret_cast<char*>(&size), sizeof(size));
+            if (infile.gcount() != sizeof(size)) {
+                printf("Error: Failed to read size\n");
+                break;
+            }
+            printf("size: %ld\n", size);
+
             if (size > 0) {
                 auto data = new uint8_t[size];
                 std::shared_ptr<uint8_t[]> data_ptr(data);
                 infile.read(reinterpret_cast<char*>(data_ptr.get()), size);
+                if (infile.gcount() != size) {
+                    printf("Error: Failed to read data (expected %ld bytes, got %ld)\n", size, infile.gcount());
+                    break;
+                }
                 binset->Append(name, data_ptr, size);
                 printf("name: %s, size: %ld\n", name.c_str(), size);
             }
